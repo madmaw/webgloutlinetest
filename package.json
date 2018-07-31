@@ -1,0 +1,30 @@
+{
+  "name": "moto1kross",
+  "version": "1.0.0",
+  "description": "",
+  "main": "index.js",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/madmaw/moto1kross.git"
+  },
+  "author": "",
+  "license": "ISC",
+  "bugs": {
+    "url": "https://github.com/madmaw/moto1kross/issues"
+  },
+  "scripts": {
+    "build": "webpack",
+    "serve": "webpack-dev-server --host 0.0.0.0 -d"
+  },
+  "homepage": "https://github.com/madmaw/moto1kross#readme",
+  "devDependencies": {
+    "ts-loader": "^3.3.1",
+    "typescript": "^2.6.2",
+    "webpack": "^3.10.0",
+    "webpack-dev-server": "^2.11.1"
+  },
+  "dependencies": {
+    "@types/gl-matrix": "^2.4.0",
+    "gl-matrix": "^2.6.1"
+  }
+}
