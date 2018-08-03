@@ -1,26 +1,49 @@
 import * as glm from 'gl-matrix';
 
 let vertexShaderSource = `
+    precision lowp float;
     attribute vec3 aVertexPosition;
     attribute vec3 aVertexNormalAverage;
+    attribute vec3 aBarrycentricCoordinate;
 
     uniform float uVertexOffsetAbsolute;    
-    uniform vec4 uVertexColor;
     uniform mat4 uModelViewMatrix;
     uniform mat4 uProjectionMatrix;
 
-    varying lowp vec4 vColor;
+    varying vec3 vBarrycentricCoordinate;
+    varying vec3 vPosition;
 
     void main() {
-        vec3 adjustedVertexPosition =  aVertexPosition + (aVertexNormalAverage * uVertexOffsetAbsolute);
-        gl_Position = uProjectionMatrix * uModelViewMatrix * vec4(adjustedVertexPosition, 1.0);
-        vColor = uVertexColor;
+        vec3 adjustedVertexPosition = aVertexPosition + (aVertexNormalAverage * uVertexOffsetAbsolute);
+        vec4 vertexPosition = uModelViewMatrix * vec4(adjustedVertexPosition, 1.0);
+        gl_Position = uProjectionMatrix * vertexPosition;
+
+        vBarrycentricCoordinate = aBarrycentricCoordinate;
+        vPosition = vertexPosition.xyz;
     }
 `;
 let fragmentShaderSource = `
-    varying lowp vec4 vColor;
+    #extension GL_OES_standard_derivatives : enable
+    precision lowp float;
+    uniform vec3 uFillColor;
+    uniform vec3 uLineColor;
+    uniform float uLineWidth;
+    uniform vec3 uFogColor;
+    uniform float uMinFogDistance;
+    uniform float uMaxFogDistance;
+    varying vec3 vBarrycentricCoordinate;
+    varying vec3 vPosition;
+
+    float edgeFactor(){
+        vec3 d = fwidth(vBarrycentricCoordinate);
+        vec3 a3 = smoothstep(vec3(0.0), d*uLineWidth, vBarrycentricCoordinate);
+        return min(min(a3.x, a3.y), a3.z);
+    }
+
     void main() {
-        gl_FragColor = vColor;
+        float distance = sqrt(vPosition.x*vPosition.x+vPosition.y*vPosition.y+vPosition.z*vPosition.z);
+        float fogginess = min(1.0, max(0.0, (uMaxFogDistance-distance) / (uMaxFogDistance - uMinFogDistance)));
+        gl_FragColor.rgba = vec4(mix(uFogColor, mix(uLineColor, uFillColor, edgeFactor()), fogginess), 1.0);
     }
 `;
 
@@ -33,6 +56,9 @@ onload = function() {
     canvas.height = window.innerHeight;
     
     let gl = canvas.getContext('webgl');
+
+    console.log(gl.getSupportedExtensions());
+    gl.getExtension('OES_standard_derivatives');
 
     function loadShader(type: number, source: string) {
         let shader = gl.createShader(type);
@@ -68,16 +94,16 @@ onload = function() {
     function initBuffers() {
         let positions = [
             // Front face
-            -1.0, -1.0,  1.0,
-            1.0, -1.0,  1.0,
-            1.0,  1.0,  1.0,
-            -1.0,  1.0,  1.0,
+            -1.0, -2.0,  1.0,
+            4.0, -2.0,  1.0,
+            1.0,  2.0,  1.0,
+            -4.0,  2.0,  1.0,
     
             // Back face
-            -1.0, -1.0, -1.0,
-            -1.0,  1.0, -1.0,
-            1.0,  1.0, -1.0,
-            1.0, -1.0, -1.0,    
+            -10.0, -1.0, -1.0,
+            -10.0,  1.0, -1.0,
+            10.0,  1.0, -1.0,
+            10.0, -1.0, -1.0,    
         ];
         let positionBuffer = gl.createBuffer();
         gl.bindBuffer(gl.ARRAY_BUFFER, positionBuffer);
@@ -102,6 +128,23 @@ onload = function() {
         let normalAverageBuffer = gl.createBuffer();
         gl.bindBuffer(gl.ARRAY_BUFFER, normalAverageBuffer);
         gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(vertexNormalAverages), gl.STATIC_DRAW);
+
+        let barrycentricCoordinates = [
+            // front face
+            1, 0, 0, 
+            0, 1, 0, 
+            0, 0, 1, 
+            0, 1, 0,
+
+            // back face
+            1, 1, 0, 
+            0, 1, 0, 
+            0, 1, 1, 
+            0, 1, 0,
+        ];
+        let barrycentricCoordinatesBuffer = gl.createBuffer();
+        gl.bindBuffer(gl.ARRAY_BUFFER, barrycentricCoordinatesBuffer);
+        gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(barrycentricCoordinates), gl.STATIC_DRAW);
 
         // This array defines each face as two triangles, using the
         // indices into the vertex array to specify each triangle's
@@ -133,17 +176,22 @@ onload = function() {
         return {
             position: positionBuffer,
             normalAverages: normalAverageBuffer, 
+            barrycentricCoordinates: barrycentricCoordinatesBuffer,
             indices: indexBuffer,
             indicesCount: indices.length, 
             lineIndices: lineIndexBuffer, 
             lineIndicesCount: lineIndices.length
+
         };
     }
 
     let shaderProgram = initShaderProgram(fragmentShaderSource, vertexShaderSource);
+    let lineColor = [0.0, 0.9, 1.0];
+    let fillColor = [0.0, 0.0, 0.0];
+    let fogColor = [0.15, 0.0, 0.15];
 
     // Set clear color to black, fully opaque
-    gl.clearColor(0.1, 0.0, 0.1, 1.0);
+    gl.clearColor(fogColor[0], fogColor[1], fogColor[2], 1.0);
     // Clear the color buffer with specified clear color
     gl.clear(gl.COLOR_BUFFER_BIT);
     // Enable depth testing
@@ -163,15 +211,19 @@ onload = function() {
 
     let aVertexPosition = gl.getAttribLocation(shaderProgram, 'aVertexPosition');
     let aVertexNormalAverage = gl.getAttribLocation(shaderProgram, 'aVertexNormalAverage');
+    let aBarrycentricCoordinate = gl.getAttribLocation(shaderProgram, 'aBarrycentricCoordinate');
 
     let uProjectionMatrix = gl.getUniformLocation(shaderProgram, 'uProjectionMatrix');
     let uModelViewMatrix = gl.getUniformLocation(shaderProgram, 'uModelViewMatrix');
-    let uVertexColor = gl.getUniformLocation(shaderProgram, 'uVertexColor');
+    let uFillColor = gl.getUniformLocation(shaderProgram, 'uFillColor');
+    let uLineColor = gl.getUniformLocation(shaderProgram, 'uLineColor');
+    let uLineWidth = gl.getUniformLocation(shaderProgram, 'uLineWidth');
+    let uFogColor = gl.getUniformLocation(shaderProgram, 'uFogColor');
+    let uMinFogDistance = gl.getUniformLocation(shaderProgram, 'uMinFogDistance');
+    let uMaxFogDistance = gl.getUniformLocation(shaderProgram, 'uMaxFogDistance');
     let uVertexOffsetAbsolute = gl.getUniformLocation(shaderProgram, 'uVertexOffsetAbsolute');
 
     let buffers = initBuffers();
-    let lineColor = [1.0, 1.0, 0.4, 1.0];
-    let bodyColor = [0.2, 0.2, 0.2, 1.0];
 
     function drawScene() {
 
@@ -197,24 +249,43 @@ onload = function() {
         );
         gl.enableVertexAttribArray(aVertexNormalAverage);
 
+        gl.bindBuffer(gl.ARRAY_BUFFER, buffers.barrycentricCoordinates);
+        gl.vertexAttribPointer(
+            aBarrycentricCoordinate, 
+            3, 
+            gl.FLOAT, 
+            false, 
+            0, 
+            0
+        );
+        gl.enableVertexAttribArray(aBarrycentricCoordinate);
+
         gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, buffers.indices);
     
         gl.useProgram(shaderProgram);
     
         gl.uniformMatrix4fv(uProjectionMatrix, false, projectionMatrix);
         gl.uniformMatrix4fv(uModelViewMatrix, false, modelViewMatrix);
-        gl.uniform4fv(uVertexColor, bodyColor);
+        gl.uniform3fv(uFillColor, fillColor);
+        gl.uniform3fv(uLineColor, lineColor);
+        gl.uniform1f(uLineWidth, 3);
         gl.uniform1f(uVertexOffsetAbsolute, 0);
+        gl.uniform1f(uMinFogDistance, 20);
+        gl.uniform1f(uMaxFogDistance, 30);
+        gl.uniform3fv(uFogColor, fogColor);
     
         gl.drawElements(gl.TRIANGLES, buffers.indicesCount, gl.UNSIGNED_SHORT, 0);
 
+        /*
         gl.uniform4fv(uVertexColor, lineColor);
         gl.uniform1f(uVertexOffsetAbsolute, 0.5);
 
         gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, buffers.lineIndices);
 
         gl.drawElements(gl.LINES, buffers.lineIndicesCount, gl.UNSIGNED_SHORT, 0);
+        */
     }
+
 
     let then = 0;
     function update(now: number) {
@@ -225,7 +296,7 @@ onload = function() {
         gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
 
         glm.mat4.identity(modelViewMatrix);
-        glm.mat4.translate(modelViewMatrix, modelViewMatrix, [0, 0, -20]);
+        glm.mat4.translate(modelViewMatrix, modelViewMatrix, [0, 0, -25 + 5 * Math.sin(now * 0.0005)]);
         glm.mat4.rotateY(modelViewMatrix, modelViewMatrix, now * 0.001);
         glm.mat4.rotateX(modelViewMatrix, modelViewMatrix, now * 0.0001);
         drawScene();
