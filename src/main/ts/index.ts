@@ -1,61 +1,148 @@
 import * as glm from 'gl-matrix';
 
 let vertexShaderSource = `
-    precision lowp float;
+    precision highp float;
     attribute vec3 aVertexPosition;
-    attribute vec3 aVertexNormalAverage;
     attribute vec3 aBarrycentricCoordinate;
 
+    uniform vec3 uViewPosition;
     uniform float uVertexOffsetAbsolute;    
-    uniform mat4 uModelViewMatrix;
+    uniform mat4 uModelMatrix;
+    uniform mat4 uViewMatrix;
     uniform mat4 uProjectionMatrix;
 
     varying vec3 vBarrycentricCoordinate;
-    varying vec3 vPosition;
+    varying vec3 vRelativePosition;
+    varying vec2 vGridCoordinate;
+    varying vec4 vScreenCoordinate;
 
     void main() {
-        vec3 adjustedVertexPosition = aVertexPosition + (aVertexNormalAverage * uVertexOffsetAbsolute);
-        vec4 vertexPosition = uModelViewMatrix * vec4(adjustedVertexPosition, 1.0);
-        gl_Position = uProjectionMatrix * vertexPosition;
-
+        vec4 adjustedVertexPosition = vec4(aVertexPosition, 1.0);
+        vec4 vertexPosition = uModelMatrix * adjustedVertexPosition;
+        vec4 relativeVertexPosition = uViewMatrix * vertexPosition;
+        vec4 screenPosition = uProjectionMatrix * relativeVertexPosition;
+        
         vBarrycentricCoordinate = aBarrycentricCoordinate;
-        vPosition = vertexPosition.xyz;
+        vRelativePosition = relativeVertexPosition.xyz;
+        vGridCoordinate = vertexPosition.xz;
+        vScreenCoordinate = screenPosition;
+
+        gl_Position = screenPosition;
     }
 `;
 let fragmentShaderSource = `
     #extension GL_OES_standard_derivatives : enable
-    precision lowp float;
+    precision highp float;
     uniform vec3 uFillColor;
+    uniform vec3 uNearFillColor;
     uniform vec3 uLineColor;
     uniform float uLineWidth;
     uniform vec3 uFogColor;
     uniform float uMinFogDistance;
     uniform float uMaxFogDistance;
+    uniform float uMinNearDistance;
+    uniform float uMaxNearDistance;
+    uniform sampler2D uPrevious;
     varying vec3 vBarrycentricCoordinate;
-    varying vec3 vPosition;
+    varying vec3 vRelativePosition;
+    varying vec2 vGridCoordinate;
+    varying vec4 vScreenCoordinate;
 
-    float edgeFactor(){
-        vec3 d = fwidth(vBarrycentricCoordinate);
-        vec3 a3 = smoothstep(vec3(0.0), d*uLineWidth, vBarrycentricCoordinate);
-        return min(min(a3.x, a3.y), a3.z);
+    float myfloor(float f) {
+        //float c = ceil(f) - 1.0;
+        // if( c > f ) {
+        //     c--;
+        // }
+        //return 0.0;
+        for( float c = 10.0; c>0.0; c-- ) {
+            if( c < f ) {
+                return c;
+            }
+        }
+        return 0.0;
+    }
+
+    float edgeFactor(float distance){
+        //vec3 f = ceil(vBarrycentricCoordinate) - 1.0;
+        vec3 f = vec3(myfloor(vBarrycentricCoordinate.x), myfloor(vBarrycentricCoordinate.y), myfloor(vBarrycentricCoordinate.z));
+        
+        vec3 b = vBarrycentricCoordinate - f;
+        vec3 d = fwidth(b);
+        vec3 a3 = smoothstep(vec3(0.0), d*uLineWidth, b);
+        //return min(min(a3.x, a3.y), a3.z);
+        if( any(lessThan(b, vec3(0.02))) ) {
+            return 0.0;
+        } else {
+            return 1.0;
+        }
     }
 
     void main() {
-        float distance = sqrt(vPosition.x*vPosition.x+vPosition.y*vPosition.y+vPosition.z*vPosition.z);
+        float distanceSquared = vRelativePosition.x*vRelativePosition.x+vRelativePosition.y*vRelativePosition.y+vRelativePosition.z*vRelativePosition.z;
+        float distance = sqrt(distanceSquared);
+
+        float alpha = 1.0;
+        if( distance > uMaxFogDistance ) {
+            alpha = 0.0;
+        }
         float fogginess = min(1.0, max(0.0, (uMaxFogDistance-distance) / (uMaxFogDistance - uMinFogDistance)));
-        gl_FragColor.rgba = vec4(mix(uFogColor, mix(uLineColor, uFillColor, edgeFactor()), fogginess), 1.0);
+        //fogginess = 1.0;
+        float nearness = min(1.0, max(0.0, (uMaxNearDistance-distance) / (uMaxNearDistance - uMinNearDistance)));
+        //float lineness = min(1.0, max(0.0, (uMaxFogDistance-distance) / uMaxFogDistance));
+        float lineness = 0.0;
+        float edgeness = 1.0;
+        float mn = min(vGridCoordinate.x - floor(vGridCoordinate.x), vGridCoordinate.y - floor(vGridCoordinate.y));
+        float mx = max(vGridCoordinate.x - floor(vGridCoordinate.x), vGridCoordinate.y - floor(vGridCoordinate.y));
+        // fan out distant grid lines
+        //float lineWidth = max(uLineWidth, (distance - uMaxNearDistance) / (uMaxFogDistance - uMaxNearDistance));
+        float lineWidth = uLineWidth;
+        if( mn < lineWidth || mx > (1.0 - lineWidth) ) {
+
+            //edgeness = clamp(min((mn - uLineWidth)/(lineWidth - uLineWidth), (1.0 - mx - uLineWidth)/(lineWidth - uLineWidth)), 0.0, 1.0);
+            float m = min(mn, 1.0 - mx);
+            edgeness = m / lineWidth * (1.0 - max(0.0, (distance - uMinFogDistance)/(uMaxFogDistance-uMinFogDistance)))*(1.0 - lineWidth * 1.1) + lineWidth * 1.1;
+            edgeness *= edgeness * edgeness;
+            //edgeness = (1.0 - 1.0/lineWidth);
+            edgeness = 0.0;
+        }
+
+        vec2 screenCoordinate = vScreenCoordinate.xy/vScreenCoordinate.w;
+        if( screenCoordinate.x > 0. ) {
+            vec4 previous = texture2D(uPrevious, vec2(screenCoordinate.x/2., screenCoordinate.y/2. + .5));
+            gl_FragColor.rgba = previous;    
+        } else {
+            vec4 current = vec4(mix(uFogColor, mix(mix(uLineColor, uFillColor, lineness), mix(uFillColor, uNearFillColor, nearness), edgeness), fogginess), alpha);
+            gl_FragColor.rgba = current;
+        }
+        //vec4 current = vec4(mix(uFogColor, mix(mix(uLineColor, uFillColor, lineness), mix(uFillColor, uNearFillColor, nearness), edgeness), fogginess), alpha);
+        //vec4 current = vec4(mod(abs(vScreenCoordinate.x), 1.0), mod(abs(vScreenCoordinate.y), 1.0), mod(abs(vScreenCoordinate.z), 1.0), 1.0);
+        //vec4 current = vec4(mod(abs(vScreenCoordinate.xy/vScreenCoordinate.w), vec2(1.0)), 0.0, 1.0);
+        //edgeness = edgeFactor(distance);
+    
     }
 `;
 
 
 
+
+let d = 100;
+let t = 5;
+
+
+
 onload = function() {
     let canvas = document.getElementById('a') as HTMLCanvasElement;
+    //let canvas = document.createElement('canvas');
 
-    canvas.width = window.innerWidth;
-    canvas.height = window.innerHeight;
+
+    let backgroundCanvas = document.getElementById('b') as HTMLCanvasElement;
+    let container = document.getElementById('c');
+
+    canvas.width = backgroundCanvas.width = window.innerWidth;
+    canvas.height = backgroundCanvas.height = window.innerHeight;
     
     let gl = canvas.getContext('webgl');
+    let bgContext = backgroundCanvas.getContext('2d');
 
     console.log(gl.getSupportedExtensions());
     gl.getExtension('OES_standard_derivatives');
@@ -94,53 +181,33 @@ onload = function() {
     function initBuffers() {
         let positions = [
             // Front face
-            -1.0, -2.0,  1.0,
-            4.0, -2.0,  1.0,
-            1.0,  2.0,  1.0,
-            -4.0,  2.0,  1.0,
+            0, 0, 0,
+            t, 0, 0,
+            t, 0, t,
+            0, 0, t,
     
-            // Back face
-            -10.0, -1.0, -1.0,
-            -10.0,  1.0, -1.0,
-            10.0,  1.0, -1.0,
-            10.0, -1.0, -1.0,    
         ];
         let positionBuffer = gl.createBuffer();
         gl.bindBuffer(gl.ARRAY_BUFFER, positionBuffer);
         gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(positions), gl.STATIC_DRAW);
 
-        let u = Math.sqrt(1/3);
-        //u = 1;
-        let vertexNormalAverages = [
-            // Front face
-            -u, -u, u, 
-            u, -u, u, 
-            u, u, u, 
-            -u, u, u, 
-
-            // Back face
-            -u, -u, -u, 
-            -u, u, -u, 
-            u, u, -u, 
-            u, -u, -u
-
-        ];
-        let normalAverageBuffer = gl.createBuffer();
-        gl.bindBuffer(gl.ARRAY_BUFFER, normalAverageBuffer);
-        gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(vertexNormalAverages), gl.STATIC_DRAW);
-
         let barrycentricCoordinates = [
             // front face
+            // t, t, 0, 
+            // 0, t, 0, 
+            // 0, t, t, 
+            // 0, t, 0,
+
             1, 0, 0, 
             0, 1, 0, 
             0, 0, 1, 
             0, 1, 0,
 
-            // back face
-            1, 1, 0, 
-            0, 1, 0, 
-            0, 1, 1, 
-            0, 1, 0,
+            // 1, 1, 0, 
+            // 0, 1, 1, 
+            // 0, 1, 1, 
+            // 1, 1, 0,
+
         ];
         let barrycentricCoordinatesBuffer = gl.createBuffer();
         gl.bindBuffer(gl.ARRAY_BUFFER, barrycentricCoordinatesBuffer);
@@ -152,7 +219,6 @@ onload = function() {
 
         const indices = [
             0,  1,  2,      0,  2,  3,    // front
-            4,  5,  6,      4,  6,  7,    // back
         ];
 
         // Now send the element array to GL
@@ -175,7 +241,6 @@ onload = function() {
 
         return {
             position: positionBuffer,
-            normalAverages: normalAverageBuffer, 
             barrycentricCoordinates: barrycentricCoordinatesBuffer,
             indices: indexBuffer,
             indicesCount: indices.length, 
@@ -186,42 +251,69 @@ onload = function() {
     }
 
     let shaderProgram = initShaderProgram(fragmentShaderSource, vertexShaderSource);
-    let lineColor = [0.0, 0.9, 1.0];
+    let lineColor = [0.3, 0.0, 0.3];
     let fillColor = [0.0, 0.0, 0.0];
-    let fogColor = [0.15, 0.0, 0.15];
+    let nearFillColor = [1.0, 0.3, 1.0];
+    let fogColor = [0.2, 0, 0.2];
 
-    // Set clear color to black, fully opaque
-    gl.clearColor(fogColor[0], fogColor[1], fogColor[2], 1.0);
+    // Set clear color to fog color
+    //gl.clearColor(fogColor[0], fogColor[1], fogColor[2], 1.0);
+    gl.clearColor(0, 0, 0, 0);
     // Clear the color buffer with specified clear color
     gl.clear(gl.COLOR_BUFFER_BIT);
     // Enable depth testing
     gl.enable(gl.DEPTH_TEST);  
     // Near things obscure far things
     gl.depthFunc(gl.LEQUAL);         
+   
     
+
+    let fov = Math.PI/3;
+    let aspectRatio = gl.canvas.clientWidth / gl.canvas.clientHeight;
     let projectionMatrix = glm.mat4.perspective(
         glm.mat4.create(),
-        Math.PI/4, 
-        gl.canvas.clientWidth / gl.canvas.clientHeight, 
-        .1, 
-        1000 
+        fov, 
+        aspectRatio, 
+        1, 
+        d/2 
     );
+    // flip so we don't need to reproject
+    let flipMatrix = glm.mat4.scale(glm.mat4.create(), glm.mat4.create(), [1, -1, 1, 1]);
+    glm.mat4.multiply(projectionMatrix, flipMatrix, projectionMatrix);
 
-    let modelViewMatrix = glm.mat4.create();
+    // console.log(glm.vec4.transformMat4(glm.vec4.create(), [-1, -2, -2, 0], projectionMatrix));
+    // console.log(glm.vec4.transformMat4(glm.vec4.create(), [-1, -2, -3, 0], projectionMatrix));
+    // console.log(glm.vec4.transformMat4(glm.vec4.create(), [-1, -2, -4, 0], projectionMatrix));
+    // console.log(glm.vec4.transformMat4(glm.vec4.create(), [-1, -2, -5, 0], projectionMatrix));
+    // console.log(glm.vec4.transformMat4(glm.vec4.create(), [-1, -2, -6, 0], projectionMatrix));
+    // console.log(glm.vec4.transformMat4(glm.vec4.create(), [-1, -2, -7, 0], projectionMatrix));
+    // console.log(glm.vec4.transformMat4(glm.vec4.create(), [-1, -2, -8, 0], projectionMatrix));
+
+    
+
+    let modelMatrix = glm.mat4.create();
+    let viewMatrix = glm.mat4.create();
 
     let aVertexPosition = gl.getAttribLocation(shaderProgram, 'aVertexPosition');
     let aVertexNormalAverage = gl.getAttribLocation(shaderProgram, 'aVertexNormalAverage');
     let aBarrycentricCoordinate = gl.getAttribLocation(shaderProgram, 'aBarrycentricCoordinate');
 
     let uProjectionMatrix = gl.getUniformLocation(shaderProgram, 'uProjectionMatrix');
-    let uModelViewMatrix = gl.getUniformLocation(shaderProgram, 'uModelViewMatrix');
+    let uModelMatrix = gl.getUniformLocation(shaderProgram, 'uModelMatrix');
+    let uViewMatrix = gl.getUniformLocation(shaderProgram, 'uViewMatrix');
+    let uViewPosition = gl.getUniformLocation(shaderProgram, 'uViewPosition');
+
     let uFillColor = gl.getUniformLocation(shaderProgram, 'uFillColor');
+    let uNearFillColor = gl.getUniformLocation(shaderProgram, 'uNearFillColor');
     let uLineColor = gl.getUniformLocation(shaderProgram, 'uLineColor');
     let uLineWidth = gl.getUniformLocation(shaderProgram, 'uLineWidth');
     let uFogColor = gl.getUniformLocation(shaderProgram, 'uFogColor');
     let uMinFogDistance = gl.getUniformLocation(shaderProgram, 'uMinFogDistance');
     let uMaxFogDistance = gl.getUniformLocation(shaderProgram, 'uMaxFogDistance');
+    let uMinNearDistance = gl.getUniformLocation(shaderProgram, 'uMinNearDistance');
+    let uMaxNearDistance = gl.getUniformLocation(shaderProgram, 'uMaxNearDistance');
     let uVertexOffsetAbsolute = gl.getUniformLocation(shaderProgram, 'uVertexOffsetAbsolute');
+    let uPrevious = gl.getUniformLocation(shaderProgram, 'uPrevious');
 
     let buffers = initBuffers();
 
@@ -238,17 +330,6 @@ onload = function() {
         );
         gl.enableVertexAttribArray(aVertexPosition);
 
-        gl.bindBuffer(gl.ARRAY_BUFFER, buffers.normalAverages);
-        gl.vertexAttribPointer(
-            aVertexNormalAverage, 
-            3, 
-            gl.FLOAT, 
-            false, 
-            0, 
-            0
-        );
-        gl.enableVertexAttribArray(aVertexNormalAverage);
-
         gl.bindBuffer(gl.ARRAY_BUFFER, buffers.barrycentricCoordinates);
         gl.vertexAttribPointer(
             aBarrycentricCoordinate, 
@@ -264,17 +345,36 @@ onload = function() {
     
         gl.useProgram(shaderProgram);
     
+
         gl.uniformMatrix4fv(uProjectionMatrix, false, projectionMatrix);
-        gl.uniformMatrix4fv(uModelViewMatrix, false, modelViewMatrix);
+        gl.uniformMatrix4fv(uViewMatrix, false, viewMatrix);
         gl.uniform3fv(uFillColor, fillColor);
+        gl.uniform3fv(uNearFillColor, nearFillColor);
         gl.uniform3fv(uLineColor, lineColor);
-        gl.uniform1f(uLineWidth, 3);
+        gl.uniform1f(uLineWidth, .02);
         gl.uniform1f(uVertexOffsetAbsolute, 0);
-        gl.uniform1f(uMinFogDistance, 20);
-        gl.uniform1f(uMaxFogDistance, 30);
+        gl.uniform1f(uMinFogDistance, d/3);
+        gl.uniform1f(uMaxFogDistance, d/2);
+        gl.uniform1f(uMinNearDistance, 0);
+        gl.uniform1f(uMaxNearDistance, d/8);
         gl.uniform3fv(uFogColor, fogColor);
+        gl.uniform3f(uViewPosition, xpos, ypos, zpos);
+        gl.activeTexture(gl.TEXTURE0);
+
+        gl.bindTexture(gl.TEXTURE_2D, sourceTexture);
+        gl.uniform1i(uPrevious, 0);
     
-        gl.drawElements(gl.TRIANGLES, buffers.indicesCount, gl.UNSIGNED_SHORT, 0);
+        glm.mat4.identity(modelMatrix);
+        let m = glm.mat4.create();
+        for( let x=0; x<d; x+=t ) {
+            for (let y=0; y<d; y+=t ) {
+                glm.mat4.identity(m);
+                glm.mat4.translate(m, m, [x - d/2, 0, y - d/2]);
+                glm.mat4.multiply(m, modelMatrix, m);
+                gl.uniformMatrix4fv(uModelMatrix, false, m);
+                gl.drawElements(gl.TRIANGLES, buffers.indicesCount, gl.UNSIGNED_SHORT, 0);        
+            }
+        }
 
         /*
         gl.uniform4fv(uVertexColor, lineColor);
@@ -286,20 +386,216 @@ onload = function() {
         */
     }
 
+    let dx = 0;
+    let dy = 0;
+    container.onmousedown = function(e: MouseEvent) {
+        if( !e.button ) {
+            container.requestPointerLock();
+        }
+    }
 
+    container.onmousemove = function(e: MouseEvent) {
+        if( document.pointerLockElement == container ) {
+            dx += e.movementX;
+            dy += e.movementY;    
+        }
+    }
+
+
+    let xpos = 0;
+    let ypos = 2;
+    let zpos = 0;
     let then = 0;
+    let frames = 0;
+
+    let keys: {[_: number]: boolean} = {};
+
+    window.onkeydown = function(e: KeyboardEvent) {
+        keys[e.keyCode] = true;
+    }
+    window.onkeyup = function(e: KeyboardEvent) {
+        keys[e.keyCode] = false;
+    }
+
+    const fb = gl.createFramebuffer();
+    gl.bindFramebuffer(gl.FRAMEBUFFER, fb);
+
+    let targetTexture = gl.createTexture();
+    gl.bindTexture(gl.TEXTURE_2D, targetTexture);
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, canvas.width, canvas.height, 0, gl.RGBA, gl.UNSIGNED_BYTE, null);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+    
+    gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, targetTexture, 0);
+
+    gl.viewport(0, 0, canvas.width, canvas.height);
+
+    let sourceTexture = gl.createTexture();
+    gl.bindTexture(gl.TEXTURE_2D, sourceTexture);
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, canvas.width, canvas.height, 0, gl.RGBA, gl.UNSIGNED_BYTE, null);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+
+    let textureData = new Uint8Array(canvas.width * canvas.height * 4);
+
+    let imageData = bgContext.createImageData(backgroundCanvas.width, backgroundCanvas.height);
+
     function update(now: number) {
+
         requestAnimationFrame(update);
         let diff = now - then;
+
+
+        glm.mat4.identity(viewMatrix);
+        //glm.mat4.rotateY(modelViewMatrix, modelViewMatrix, now * 0.0001);
+        //glm.mat4.rotateX(modelViewMatrix, modelViewMatrix, now * 0.0001);
+        let xrot = dy * 2 / canvas.width;        
+        let yrot = dx * 3 / canvas.width;
+
+        let speed = diff / 200;
+        let forward = 0;
+        let side = 0;
+        let sin = Math.sin(-yrot);
+        let cos = Math.cos(-yrot);
+        // up/W
+        if( keys[38] || keys[87] ) {
+            forward += speed;
+        }
+        // down/S 
+        if( keys[40] || keys[83] ) {
+            forward -= speed;
+        }
+        // left/A 
+        if( keys[37] || keys[65] ) {
+            side += speed;
+        }
+        // right/D 
+        if( keys[39] || keys[68] ) {
+            side -= speed;
+        }
+        zpos -= cos * forward - sin * side;
+        xpos -= sin * forward + cos * side;
+
+        //console.log(`${xpos}, ${ypos}, ${zpos}`);
+
+        glm.mat4.rotateX(viewMatrix, viewMatrix, xrot);
+        glm.mat4.rotateY(viewMatrix, viewMatrix, yrot);
+        glm.mat4.translate(viewMatrix, viewMatrix, [-xpos, -ypos, -zpos]);
+
+
+        gl.bindTexture(gl.TEXTURE_2D, targetTexture);
+        gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, targetTexture, 0);
 
         // Clear the canvas before we start drawing on it.
         gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
 
-        glm.mat4.identity(modelViewMatrix);
-        glm.mat4.translate(modelViewMatrix, modelViewMatrix, [0, 0, -25 + 5 * Math.sin(now * 0.0005)]);
-        glm.mat4.rotateY(modelViewMatrix, modelViewMatrix, now * 0.001);
-        glm.mat4.rotateX(modelViewMatrix, modelViewMatrix, now * 0.0001);
         drawScene();
+
+        let tmp = sourceTexture;
+        sourceTexture = targetTexture;
+        targetTexture = tmp;
+
+        let pos = glm.vec4.create();
+        glm.vec4.set(pos, 0, 0, 0, 1);
+        glm.vec4.transformMat4(pos, pos, viewMatrix);
+        //console.log(pos, [xpos, ypos, zpos]);
+
+        //background.setAttribute('style', `padding-left: ${Math.abs(dx)}px; padding-top: ${Math.abs(dy)}px;`);
+        //canvas.setAttribute('style', `background-position: ${-dx}px ${-dy}px`);
+
+        let w = Math.PI * d / 20 * (Math.PI*2/fov);
+        //bgContext.fillStyle = `rgb(${fogColor[0] * 255}, ${fogColor[1] * 255}, ${fogColor[2] * 255})`;
+        bgContext.fillStyle = '#fff';
+        bgContext.fillRect(0, 0, backgroundCanvas.width, backgroundCanvas.height);
+        bgContext.fillStyle = '#333';
+
+        glm.mat4.identity(modelMatrix);
+        glm.mat4.rotateX(modelMatrix, modelMatrix, xrot);
+        glm.mat4.multiply(modelMatrix, projectionMatrix, modelMatrix);
+
+        let x = (-yrot / (Math.PI * 2) * canvas.width * (Math.PI*2/(fov*aspectRatio)))%(w*2) - (canvas.width)/2;
+
+        let screenPos = glm.vec3.create();
+        glm.vec3.transformMat4(screenPos, [0, -ypos, -d/2], modelMatrix);
+        // console.log(screenPos);
+        // let x = (screenPos[0]/screenPos[3] * canvas.width/2 % (w*2)) - (canvas.width)/2;
+        let y = -screenPos[1] * canvas.height/2;
+        // while( x < canvas.width ) {
+        //     bgContext.fillRect(x + (canvas.width - w)/2, y + (canvas.height - w)/2, w, w);
+        //     x+= w*2;
+        // }
+
+        while( x < canvas.width ) {
+            bgContext.fillRect(x + (canvas.width)/2, y + (canvas.height)/2 - w*2, w, w * 2);
+            x+= w*2;
+        }
+
+        gl.readPixels(0, 0, canvas.width, canvas.height, gl.RGBA, gl.UNSIGNED_BYTE, textureData);
+        /*
+
+        // modify texture
+        let i = 0;
+        while( i < textureData.length ) {
+            let x = i % (canvas.width*4)/4;
+            let y = Math.floor(i / (canvas.width*4));
+            let r = textureData[i++];
+            let g = textureData[i++];
+            let b = textureData[i++];
+            let a = textureData[i++];
+            
+            if( a > 0 ) {
+                // blur
+                let d = (255 - a)/15;
+                //let d = 5;
+                let count = 1;
+                let rb = 0;
+                let gb = 0;
+                let bb = 0;
+                for( let dx=0; dx<d; dx++ ) {
+                    let ix = Math.floor(x + dx - d/2);
+                    if( ix >= 0 && ix < canvas.width ) {
+                        for( let dy=0; dy < d; dy++ ) {
+                            let iy = Math.floor(y + dy - d/2);
+                            if( iy >= 0 && iy < canvas.height ) {
+                                let j = (ix + iy*canvas.width)*4;
+                                rb += textureData[j++];
+                                gb += textureData[j++];
+                                bb += textureData[j];
+                                count++;
+                            }
+                        }
+                    }
+                }
+                rb /= count;
+                gb /= count;
+                bb /= count;
+                r = Math.max(r, rb);
+                g = Math.max(g, gb);
+                b = Math.max(b, bb);
+
+                // fog
+                r = (r * a) / 255 + (255 - a);
+                g = (g * a) / 255 + (255 - a);
+                b = (b * a) / 255 + (255 - a);
+                a = 255;
+                imageData.data[i-4] = r;
+                imageData.data[i-3] = g;
+                imageData.data[i-2] = b;
+                imageData.data[i-1] = a;
+            }
+        }
+        */
+
+        imageData.data.set(textureData);
+        bgContext.putImageData(imageData, 0, 0);    
+
+        bgContext.fillStyle = '#f00';
+
+        frames ++;
+
+        bgContext.fillText(`${Math.round((frames * 1000)/now)} (${Math.round(1000/diff)}) FPS`, 10, 30);
         
         then = now;
     }

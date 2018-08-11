@@ -1,0 +1,38 @@
+<svg width="27" height="30" xmlns="http://www.w3.org/2000/svg">
+     <defs>
+        <pattern id="p" 
+             x="0" y="0" width=".5" height=".5" patternUnits="userSpaceOnUse"
+             >
+             <rect x="0" y="0" width=".5" height=".5" fill="#303"/>
+            <rect x=".1" y=".1" width=".3" height=".2" fill="#999"/>
+        </pattern> 
+      <linearGradient id="s" x1="0" y1="0" x2="0" y2="1">
+        <stop offset="0" stop-color="#000" />
+        <stop offset=".4" stop-color="#626" />
+      </linearGradient>
+      <linearGradient id="b" x1="0" y1="0" x2="0" y2="1">
+        <stop offset=".1" stop-color="#303" />
+        <stop offset=".2" stop-color="#303" />
+        <stop offset="1" stop-color="#000" />
+      </linearGradient>
+      <path id="b1" d="M0 9 h1 v3 h1 v-4 h1 v1 h1 v-2 h1 v3 h1 v-5 h1 v4 h1 v-1 h1 v30 L0 30"/>
+    </defs>
+    <rect x="0" y="0" width="27" height="30" fill="url(#s)"/>
+    <!--
+    <rect x="0" y="12" width="9" height="25" fill="url(#b)"/>
+    <rect x="0" y="2" width="3" height="28" fill="url(#b)"/>
+    <rect x="2" y="4" width="3" height="30" fill="url(#b)"/>
+    <rect x="4" y="9" width="3" height="30" fill="url(#b)"/>
+    <rect x="6" y="2" width="3" height="30" fill="url(#b)"/>
+    <rect x="8" y="5" width="3" height="30" fill="url(#b)"/>
+
+-->
+    <use href="#b1" x="5" y="3" fill="url(#p)" transform="scale(.5)"/>
+    <use href="#b1" x="-25" y="6" fill="url(#p)" transform="scale(-.5, .5)"/>
+    <use href="#b1" x="0" y="-1" fill="#606"/>
+    <use href="#b1" x="9" y="-3" fill="#606"/>
+    <use href="#b1" x="18" y="0" fill="#606" transform="scale(-1, 1)"/>
+    <use href="#b1" x="-27" y="-2" fill="#606" transform="scale(-1, 1)"/>
+    <use href="#b1" x="0" y="1" fill="url(#b)" transform="scale(3, 1)"/>
+
+ </svg>
