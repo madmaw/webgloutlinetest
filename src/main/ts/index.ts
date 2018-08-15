@@ -9,6 +9,7 @@ let vertexShaderSource = `
     uniform float uVertexOffsetAbsolute;    
     uniform mat4 uModelMatrix;
     uniform mat4 uViewMatrix;
+    uniform mat4 uPreviousViewMatrix;
     uniform mat4 uProjectionMatrix;
 
     varying vec3 vBarrycentricCoordinate;
@@ -25,7 +26,7 @@ let vertexShaderSource = `
         vBarrycentricCoordinate = aBarrycentricCoordinate;
         vRelativePosition = relativeVertexPosition.xyz;
         vGridCoordinate = vertexPosition.xz;
-        vScreenCoordinate = screenPosition;
+        vScreenCoordinate = uProjectionMatrix * uPreviousViewMatrix * vertexPosition;
 
         gl_Position = screenPosition;
     }
@@ -33,6 +34,7 @@ let vertexShaderSource = `
 let fragmentShaderSource = `
     #extension GL_OES_standard_derivatives : enable
     precision highp float;
+
     uniform vec3 uFillColor;
     uniform vec3 uNearFillColor;
     uniform vec3 uLineColor;
@@ -43,6 +45,9 @@ let fragmentShaderSource = `
     uniform float uMinNearDistance;
     uniform float uMaxNearDistance;
     uniform sampler2D uPrevious;
+    uniform vec2 uPreviousDimension;
+    uniform bool uBlurHorizontal;
+
     varying vec3 vBarrycentricCoordinate;
     varying vec3 vRelativePosition;
     varying vec2 vGridCoordinate;
@@ -77,16 +82,47 @@ let fragmentShaderSource = `
         }
     }
 
+    float getLightness(vec3 color) {
+        float mx = max(max(color.r, color.g), color.b);
+        float mn = min(min(color.r, color.g), color.b);
+        return (mx + mn)/2.;
+    }
+
+    vec4 getSampleColor(in vec4 currentColor, in vec2 screenCoordinate, in float i, inout float count) {
+        
+        vec4 previousColor = texture2D(uPrevious, screenCoordinate);
+        // float d = (5.-i)/25.;
+        
+        // return previousColor * d;
+        // if( previousColor.a > 0. ) {
+        //     float currentLightness = getLightness(currentColor.rgb);
+        //     float previousLightness = getLightness(previousColor.rgb);
+        //     if( currentLightness < previousLightness) {
+        //         float diff = previousLightness - currentLightness;
+        //         count += .7;
+        //         return previousColor + diff * (currentColor - previousColor);
+        //     } else {
+        //         return vec4(0.);
+        //     }                
+        // } else {
+        //     return vec4(0.);
+        // }
+        float amt = (previousColor.a  - currentColor.a+ 1.) /2.;
+        //float amt = max(currentColor.a - previousColor.a, 0.);
+        count += amt * (.3 + currentColor.a/2.);
+        return mix(currentColor, previousColor, amt);
+    }
+
     void main() {
         float distanceSquared = vRelativePosition.x*vRelativePosition.x+vRelativePosition.y*vRelativePosition.y+vRelativePosition.z*vRelativePosition.z;
         float distance = sqrt(distanceSquared);
+        float maxFogDistanceSquared = uMaxFogDistance * uMaxFogDistance;
 
-        float alpha = 1.0;
+        //float fogginess = min(1.0, max(0.0, (uMaxFogDistance-distance) / (uMaxFogDistance - uMinFogDistance)));
+        float fogginess = min(1.0, max(0.0, (maxFogDistanceSquared-distanceSquared) / maxFogDistanceSquared));
         if( distance > uMaxFogDistance ) {
-            alpha = 0.0;
+            fogginess = 0.0;
         }
-        float fogginess = min(1.0, max(0.0, (uMaxFogDistance-distance) / (uMaxFogDistance - uMinFogDistance)));
-        //fogginess = 1.0;
         float nearness = min(1.0, max(0.0, (uMaxNearDistance-distance) / (uMaxNearDistance - uMinNearDistance)));
         //float lineness = min(1.0, max(0.0, (uMaxFogDistance-distance) / uMaxFogDistance));
         float lineness = 0.0;
@@ -103,20 +139,32 @@ let fragmentShaderSource = `
             edgeness = m / lineWidth * (1.0 - max(0.0, (distance - uMinFogDistance)/(uMaxFogDistance-uMinFogDistance)))*(1.0 - lineWidth * 1.1) + lineWidth * 1.1;
             edgeness *= edgeness * edgeness;
             //edgeness = (1.0 - 1.0/lineWidth);
-            edgeness = 0.0;
+            //edgeness = 0.0;
         }
 
-        vec2 screenCoordinate = vScreenCoordinate.xy/vScreenCoordinate.w;
-        if( screenCoordinate.x > 0. ) {
-            vec4 previous = texture2D(uPrevious, vec2(screenCoordinate.x/2., screenCoordinate.y/2. + .5));
-            gl_FragColor.rgba = previous;    
-        } else {
-            vec4 current = vec4(mix(uFogColor, mix(mix(uLineColor, uFillColor, lineness), mix(uFillColor, uNearFillColor, nearness), edgeness), fogginess), alpha);
-            gl_FragColor.rgba = current;
-        }
+        vec2 textureCoordinate = (vScreenCoordinate.xy/vScreenCoordinate.w)/2. + .5;
         //vec4 current = vec4(mix(uFogColor, mix(mix(uLineColor, uFillColor, lineness), mix(uFillColor, uNearFillColor, nearness), edgeness), fogginess), alpha);
         //vec4 current = vec4(mod(abs(vScreenCoordinate.x), 1.0), mod(abs(vScreenCoordinate.y), 1.0), mod(abs(vScreenCoordinate.z), 1.0), 1.0);
         //vec4 current = vec4(mod(abs(vScreenCoordinate.xy/vScreenCoordinate.w), vec2(1.0)), 0.0, 1.0);
+        //vec4 current = vec4(mix(uFogColor, mix(mix(uLineColor, uFillColor, lineness), mix(uFillColor, uNearFillColor, nearness), edgeness), fogginess), alpha);
+        vec4 current = vec4(mix(mix(uLineColor, uFillColor, lineness), mix(uFillColor, uNearFillColor, nearness), edgeness), fogginess);
+        // blur
+        float count = 0.;
+        vec4 previous = getSampleColor(current, textureCoordinate, 0., count);
+        for( int i=1; i<7; ++i ) {
+            float f = float(i*i+3)/2.;
+            //float f = float(i);
+            previous += getSampleColor(current, textureCoordinate + vec2(uPreviousDimension.x, 0.) * f, f, count);
+            previous += getSampleColor(current, textureCoordinate - vec2(uPreviousDimension.x, 0.) * f, f, count);
+            previous += getSampleColor(current, textureCoordinate + vec2(0., uPreviousDimension.y) * f, f, count);
+            previous += getSampleColor(current, textureCoordinate - vec2(0., uPreviousDimension.y) * f, f, count);
+        }
+        if( count > 0. ) {
+            previous /= count;
+            current = vec4(mix(current.rgb, previous.rgb, .55), current.a);
+        }
+        gl_FragColor.rgba = current;
+        //gl_FragColor = current;
         //edgeness = edgeFactor(distance);
     
     }
@@ -146,6 +194,7 @@ onload = function() {
 
     console.log(gl.getSupportedExtensions());
     gl.getExtension('OES_standard_derivatives');
+    let ext = gl.getExtension('EXT_blend_minmax');
 
     function loadShader(type: number, source: string) {
         let shader = gl.createShader(type);
@@ -253,7 +302,7 @@ onload = function() {
     let shaderProgram = initShaderProgram(fragmentShaderSource, vertexShaderSource);
     let lineColor = [0.3, 0.0, 0.3];
     let fillColor = [0.0, 0.0, 0.0];
-    let nearFillColor = [1.0, 0.3, 1.0];
+    let nearFillColor = [1.0, 1.0, 0.3];
     let fogColor = [0.2, 0, 0.2];
 
     // Set clear color to fog color
@@ -265,6 +314,11 @@ onload = function() {
     gl.enable(gl.DEPTH_TEST);  
     // Near things obscure far things
     gl.depthFunc(gl.LEQUAL);         
+    // overlapping things use the maximum alpha value (because it's fogged)
+    // gl.enable(gl.BLEND);
+    // gl.blendFunc(gl.SRC_ALPHA, ext.MAX_EXT);
+    gl.disable(gl.BLEND);
+    
    
     
 
@@ -277,6 +331,7 @@ onload = function() {
         1, 
         d/2 
     );
+    let blurHorizontal = 1;
     // flip so we don't need to reproject
     let flipMatrix = glm.mat4.scale(glm.mat4.create(), glm.mat4.create(), [1, -1, 1, 1]);
     glm.mat4.multiply(projectionMatrix, flipMatrix, projectionMatrix);
@@ -293,6 +348,7 @@ onload = function() {
 
     let modelMatrix = glm.mat4.create();
     let viewMatrix = glm.mat4.create();
+    let previousViewMatrix = glm.mat4.create();
 
     let aVertexPosition = gl.getAttribLocation(shaderProgram, 'aVertexPosition');
     let aVertexNormalAverage = gl.getAttribLocation(shaderProgram, 'aVertexNormalAverage');
@@ -301,6 +357,7 @@ onload = function() {
     let uProjectionMatrix = gl.getUniformLocation(shaderProgram, 'uProjectionMatrix');
     let uModelMatrix = gl.getUniformLocation(shaderProgram, 'uModelMatrix');
     let uViewMatrix = gl.getUniformLocation(shaderProgram, 'uViewMatrix');
+    let uPreviousViewMatrix = gl.getUniformLocation(shaderProgram, 'uPreviousViewMatrix');
     let uViewPosition = gl.getUniformLocation(shaderProgram, 'uViewPosition');
 
     let uFillColor = gl.getUniformLocation(shaderProgram, 'uFillColor');
@@ -314,10 +371,12 @@ onload = function() {
     let uMaxNearDistance = gl.getUniformLocation(shaderProgram, 'uMaxNearDistance');
     let uVertexOffsetAbsolute = gl.getUniformLocation(shaderProgram, 'uVertexOffsetAbsolute');
     let uPrevious = gl.getUniformLocation(shaderProgram, 'uPrevious');
+    let uPreviousDimension = gl.getUniformLocation(shaderProgram, 'uPreviousDimension');
+    let uBlurHorizontal = gl.getUniformLocation(shaderProgram, 'uBlurHorizontal');
 
     let buffers = initBuffers();
 
-    function drawScene() {
+    function drawScene(now: number) {
 
         gl.bindBuffer(gl.ARRAY_BUFFER, buffers.position);
         gl.vertexAttribPointer(
@@ -348,6 +407,7 @@ onload = function() {
 
         gl.uniformMatrix4fv(uProjectionMatrix, false, projectionMatrix);
         gl.uniformMatrix4fv(uViewMatrix, false, viewMatrix);
+        gl.uniformMatrix4fv(uPreviousViewMatrix, false, previousViewMatrix);
         gl.uniform3fv(uFillColor, fillColor);
         gl.uniform3fv(uNearFillColor, nearFillColor);
         gl.uniform3fv(uLineColor, lineColor);
@@ -363,18 +423,33 @@ onload = function() {
 
         gl.bindTexture(gl.TEXTURE_2D, sourceTexture);
         gl.uniform1i(uPrevious, 0);
+        gl.uniform2f(uPreviousDimension, 1/canvas.width, 1/canvas.height);
+        gl.uniform1i(uBlurHorizontal, blurHorizontal);
+        
     
         glm.mat4.identity(modelMatrix);
         let m = glm.mat4.create();
+
         for( let x=0; x<d; x+=t ) {
             for (let y=0; y<d; y+=t ) {
                 glm.mat4.identity(m);
                 glm.mat4.translate(m, m, [x - d/2, 0, y - d/2]);
-                glm.mat4.multiply(m, modelMatrix, m);
+                //glm.mat4.multiply(m, modelMatrix, m);
                 gl.uniformMatrix4fv(uModelMatrix, false, m);
                 gl.drawElements(gl.TRIANGLES, buffers.indicesCount, gl.UNSIGNED_SHORT, 0);        
             }
         }
+
+
+        gl.uniform3fv(uNearFillColor, [1, 1, 1]);
+        gl.uniform3fv(uLineColor, [1, 1, 1]);
+
+        glm.mat4.identity(m);
+        glm.mat4.translate(m, m, [Math.sin(now/1000) * 0 + -t/2, 0, -10.5]);
+        glm.mat4.rotateX(m, m, -Math.PI/2);
+        gl.uniformMatrix4fv(uModelMatrix, false, m);
+        gl.drawElements(gl.TRIANGLES, buffers.indicesCount, gl.UNSIGNED_SHORT, 0);        
+
 
         /*
         gl.uniform4fv(uVertexColor, lineColor);
@@ -447,7 +522,7 @@ onload = function() {
         requestAnimationFrame(update);
         let diff = now - then;
 
-
+        glm.mat4.copy(previousViewMatrix, viewMatrix);
         glm.mat4.identity(viewMatrix);
         //glm.mat4.rotateY(modelViewMatrix, modelViewMatrix, now * 0.0001);
         //glm.mat4.rotateX(modelViewMatrix, modelViewMatrix, now * 0.0001);
@@ -491,7 +566,8 @@ onload = function() {
         // Clear the canvas before we start drawing on it.
         gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
 
-        drawScene();
+        blurHorizontal = (blurHorizontal + 1)%2;
+        drawScene(now);
 
         let tmp = sourceTexture;
         sourceTexture = targetTexture;
@@ -506,31 +582,11 @@ onload = function() {
         //canvas.setAttribute('style', `background-position: ${-dx}px ${-dy}px`);
 
         let w = Math.PI * d / 20 * (Math.PI*2/fov);
-        //bgContext.fillStyle = `rgb(${fogColor[0] * 255}, ${fogColor[1] * 255}, ${fogColor[2] * 255})`;
-        bgContext.fillStyle = '#fff';
-        bgContext.fillRect(0, 0, backgroundCanvas.width, backgroundCanvas.height);
-        bgContext.fillStyle = '#333';
 
         glm.mat4.identity(modelMatrix);
         glm.mat4.rotateX(modelMatrix, modelMatrix, xrot);
         glm.mat4.multiply(modelMatrix, projectionMatrix, modelMatrix);
 
-        let x = (-yrot / (Math.PI * 2) * canvas.width * (Math.PI*2/(fov*aspectRatio)))%(w*2) - (canvas.width)/2;
-
-        let screenPos = glm.vec3.create();
-        glm.vec3.transformMat4(screenPos, [0, -ypos, -d/2], modelMatrix);
-        // console.log(screenPos);
-        // let x = (screenPos[0]/screenPos[3] * canvas.width/2 % (w*2)) - (canvas.width)/2;
-        let y = -screenPos[1] * canvas.height/2;
-        // while( x < canvas.width ) {
-        //     bgContext.fillRect(x + (canvas.width - w)/2, y + (canvas.height - w)/2, w, w);
-        //     x+= w*2;
-        // }
-
-        while( x < canvas.width ) {
-            bgContext.fillRect(x + (canvas.width)/2, y + (canvas.height)/2 - w*2, w, w * 2);
-            x+= w*2;
-        }
 
         gl.readPixels(0, 0, canvas.width, canvas.height, gl.RGBA, gl.UNSIGNED_BYTE, textureData);
         /*
@@ -591,12 +647,41 @@ onload = function() {
         imageData.data.set(textureData);
         bgContext.putImageData(imageData, 0, 0);    
 
+        bgContext.globalCompositeOperation = 'source-over';
+
         bgContext.fillStyle = '#f00';
 
         frames ++;
 
         bgContext.fillText(`${Math.round((frames * 1000)/now)} (${Math.round(1000/diff)}) FPS`, 10, 30);
         
+        bgContext.globalCompositeOperation = 'destination-over';
+
+        bgContext.fillStyle = '#333';
+
+        let x = (-yrot / (Math.PI * 2) * canvas.width * (Math.PI*2/(fov*aspectRatio)))%(w*2) - (canvas.width)/2;
+
+        let screenPos = glm.vec3.create();
+        glm.vec3.transformMat4(screenPos, [0, -ypos, -d/2], modelMatrix);
+        // console.log(screenPos);
+        // let x = (screenPos[0]/screenPos[3] * canvas.width/2 % (w*2)) - (canvas.width)/2;
+        let y = screenPos[1] * canvas.height/2;
+        // while( x < canvas.width ) {
+        //     bgContext.fillRect(x + (canvas.width - w)/2, y + (canvas.height - w)/2, w, w);
+        //     x+= w*2;
+        // }
+
+        while( x < canvas.width ) {
+            bgContext.fillRect(x + (canvas.width)/2, y + (canvas.height)/2 - w*2, w, w * 2);
+            x+= w*2;
+        }
+
+        bgContext.fillStyle = `rgb(${fogColor[0] * 255}, ${fogColor[1] * 255}, ${fogColor[2] * 255})`;
+        //bgContext.fillStyle = '#fff';
+        bgContext.fillRect(0, 0, backgroundCanvas.width, backgroundCanvas.height);
+
+
+
         then = now;
     }
     update(0);
